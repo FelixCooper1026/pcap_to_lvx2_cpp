@@ -1,6 +1,6 @@
 # PCAP to LVX2 Converter
 
-一个用于将 Livox 激光雷达通过 Wireshark/Tcpdump 捕获的 PCAP 文件转换为 LVX2 格式的工具。支持中文路径，提供图形界面操作。
+一个用于将 Livox 激光雷达通过 Wireshark/Tcpdump 捕获的 PCAP 格式数据转换为 LVX2 格式的工具，后者可在官方上位机软件 Livox Viewer2 中直接读取。支持中文路径，提供图形界面操作。
 
 ## 功能特点
 
