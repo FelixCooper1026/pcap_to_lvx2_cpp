@@ -5,6 +5,10 @@
 #include <filesystem>
 #include <string>
 #include <conio.h>
+#include <shellapi.h>
+#include <winuser.h>
+
+#pragma comment(lib, "user32.lib")
 
 std::string selectPcapFile() {
     OPENFILENAMEW ofn;
@@ -21,6 +25,7 @@ std::string selectPcapFile() {
     ofn.nMaxFileTitle = 0;
     ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+    ofn.lpstrTitle = L"选择PCAP文件";
 
     if (GetOpenFileNameW(&ofn)) {
         // 将宽字符转换为多字节字符（使用 CP_ACP 而不是 CP_UTF8）
@@ -56,6 +61,7 @@ int main(int argc, char* argv[]) {
     // 设置控制台输出代码页为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
     // 确保输出不被缓冲
+
     std::cout.setf(std::ios::unitbuf);
     std::cerr.setf(std::ios::unitbuf);
 
@@ -86,10 +92,17 @@ int main(int argc, char* argv[]) {
 
     PCAPToLVX2 converter(input_file, output_file);
     if (converter.convert()) {
-        std::cout << "\n>>> Conversion completed successfully !" << std::endl;
-        std::cout << ">>> Output file location: " << std::filesystem::absolute(output_file).string() << std::endl;
+        std::string abs_path = std::filesystem::absolute(output_file).string();
+        std::string message = "LVX2 格式转换成功!\n\n文件路径：" + abs_path;
+        
+        // 显示成功消息框
+        MessageBoxA(NULL, message.c_str(), "Success", MB_OK | MB_ICONINFORMATION);
+        
+        // 等待用户点击OK后打开输出文件所在文件夹
+        std::string output_dir = std::filesystem::path(output_file).parent_path().string();
+        ShellExecuteA(NULL, "open", output_dir.c_str(), NULL, NULL, SW_SHOW);
     } else {
-        std::cerr << "[ERROR] Conversion failed." << std::endl;
+        std::cerr << "\n[ERROR] Conversion failed." << std::endl;
         waitForExit();
         return 1;
     }

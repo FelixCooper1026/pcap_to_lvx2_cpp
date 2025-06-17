@@ -1,6 +1,7 @@
 ﻿#include "pcap_to_lvx2.h"
 #include "packet_parser.h"
 #include "lvx2_writer.h"
+#include "config_manager.h"
 #include <fstream>
 #include <iostream>
 #include <WinSock2.h>
@@ -9,8 +10,54 @@
 #include <filesystem>
 #include <sstream>
 #include <algorithm>
+#include <commdlg.h>
+#include <shlobj.h>
+#include <shellapi.h>
+#include <chrono>
+#include <iomanip>
 
-bool isPcapFile(const std::string& filename) {
+// 日志级别枚举
+enum class LogLevel {
+    LOG_INFO,
+    LOG_WARNING,
+    LOG_ERROR,
+    LOG_SUCCESS,
+    LOG_EDITCAP_OUTPUT
+};
+
+// 获取当前时间字符串
+std::string getCurrentTimeString() {
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    std::stringstream ss;
+    ss << std::put_time(std::localtime(&time), "%Y-%m-%d %H:%M:%S");
+    return ss.str();
+}
+
+// 日志打印函数
+void log(LogLevel level, const std::string& message) {
+    std::string levelStr;
+    switch (level) {
+        case LogLevel::LOG_INFO:
+            levelStr = "[INFO]";
+            break;
+        case LogLevel::LOG_WARNING:
+            levelStr = "[WARNING]";
+            break;
+        case LogLevel::LOG_ERROR:
+            levelStr = "[ERROR]";
+            break;
+        case LogLevel::LOG_SUCCESS:
+            levelStr = "[SUCCESS]";
+            break;
+        case LogLevel::LOG_EDITCAP_OUTPUT:
+            levelStr = "[EDITCAP]";
+            break;
+    }
+    std::cout << getCurrentTimeString() << " " << levelStr << " " << message << std::endl;
+}
+
+bool PCAPToLVX2::isPcapFile(const std::string& filename) {
     FILE* fp = fopen(filename.c_str(), "rb");
     if (!fp) return false;
 
@@ -26,7 +73,7 @@ bool isPcapFile(const std::string& filename) {
         magic == 0x0a0d0d0a);
 }
 
-bool isPcapngFile(const std::string& filename) {
+bool PCAPToLVX2::isPcapngFile(const std::string& filename) {
     FILE* fp = fopen(filename.c_str(), "rb");
     if (!fp) return false;
 
@@ -40,89 +87,176 @@ bool isPcapngFile(const std::string& filename) {
     return (magic == 0x0a0d0d0a);
 }
 
-std::string findEditcapPath() {
-    // 可能的 Wireshark 安装路径
-    std::vector<std::string> possible_paths = {
-        "C:\\Program Files\\Wireshark\\editcap.exe",
-        "C:\\Program Files (x86)\\Wireshark\\editcap.exe",
-        "S:\\Software\\Wireshark\\editcap.exe"
-    };
+std::string selectEditcapPath() {
+    OPENFILENAMEW ofn;
+    wchar_t szFile[260] = { 0 };
 
-    // 检查环境变量 PATH 中的 Wireshark
-    char* path = getenv("PATH");
-    if (path) {
-        std::string path_str(path);
-        std::stringstream ss(path_str);
-        std::string dir;
-        while (std::getline(ss, dir, ';')) {
-            possible_paths.push_back(dir + "\\editcap.exe");
-        }
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = L"Executable Files\0editcap.exe\0All Files\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFileTitle = NULL;
+    ofn.nMaxFileTitle = 0;
+    ofn.lpstrInitialDir = NULL;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+    ofn.lpstrTitle = L"选择editcap.exe文件";
+
+    if (GetOpenFileNameW(&ofn)) {
+        int size_needed = WideCharToMultiByte(CP_ACP, 0, szFile, -1, NULL, 0, NULL, NULL);
+        std::string strTo(size_needed, 0);
+        WideCharToMultiByte(CP_ACP, 0, szFile, -1, &strTo[0], size_needed, NULL, NULL);
+
+        // 使用 ConfigManager 保存路径
+        ConfigManager::getInstance().setEditcapPath(strTo);
+        return strTo;
     }
-
-    // 检查每个可能的路径
-    for (const auto& path : possible_paths) {
-        if (std::filesystem::exists(path)) {
-            // 检查文件是否可访问
-            FILE* fp = fopen(path.c_str(), "rb");
-            if (fp) {
-                fclose(fp);
-                //std::cout << "Found editcap at: " << path << std::endl;
-                return path;
-            }
-        }
-    }
-
     return "";
 }
 
-std::string convertPcapngToPcap(const std::string& pcapng_file) {
-    std::filesystem::path input_path = std::filesystem::absolute(pcapng_file);
-    std::filesystem::path output_path = input_path.parent_path() / 
-                                      (input_path.stem().string() + "_converted.pcap");
-    
-    std::string editcap_path = findEditcapPath();
-    if (editcap_path.empty()) {
-        std::cerr << "\n[ERROR] Could not find editcap.exe. Please make sure Wireshark is installed." << std::endl;
+std::string PCAPToLVX2::convertPcapngToPcap(const std::string& pcapng_file) {
+    // 1. 优先从配置加载路径（自动处理空配置情况）
+    std::string editcap_path = ConfigManager::getInstance().getEditcapPath();
+
+    // 2. 路径有效性二次验证（包括路径格式标准化）
+    bool need_reselect = editcap_path.empty();
+    if (!need_reselect) {
+        try {
+            editcap_path = std::filesystem::absolute(editcap_path).lexically_normal().string();
+            need_reselect = !std::filesystem::exists(editcap_path);
+        }
+        catch (...) {
+            need_reselect = true;
+        }
+    }
+
+    // 3. 路径无效时让用户选择并保存
+    if (need_reselect) {
+        log(LogLevel::LOG_INFO, "Editcap path invalid, requesting user selection...");
+        MessageBoxA(NULL, "未找到有效的 editcap.exe 路径，请选择 Wireshark 安装目录下的 editcap.exe 文件。", "选择 editcap.exe", MB_ICONINFORMATION);
+        editcap_path = selectEditcapPath();
+        if (editcap_path.empty()) {
+            log(LogLevel::LOG_ERROR, "User cancelled path selection");
+            MessageBoxA(NULL, "未选择 editcap.exe 文件，转换终止。", "转换错误", MB_ICONERROR);
+            return "";
+        }
+
+        try {
+            editcap_path = std::filesystem::absolute(editcap_path).lexically_normal().string();
+            ConfigManager::getInstance().setEditcapPath(editcap_path);
+            log(LogLevel::LOG_SUCCESS, "Saved new path: " + editcap_path);
+        }
+        catch (...) {
+            log(LogLevel::LOG_ERROR, "Invalid path format: " + editcap_path);
+            MessageBoxA(NULL, "选择的路径格式无效，请重新选择。", "路径错误", MB_ICONERROR);
+            return "";
+        }
+    }
+
+    // 4. 规范化输入输出路径（增强异常处理）
+    std::filesystem::path input_path, output_path;
+    try {
+        input_path = std::filesystem::absolute(pcapng_file).lexically_normal();
+        output_path = input_path.parent_path() / (input_path.stem().string() + "_converted.pcap");
+        output_path = std::filesystem::absolute(output_path).lexically_normal();
+    }
+    catch (const std::exception& e) {
+        log(LogLevel::LOG_ERROR, "Path normalization failed: " + std::string(e.what()));
         return "";
     }
-    
-    // 添加调试信息
-    //std::cout << "Current directory: " << std::filesystem::current_path() << std::endl;
-    //std::cout << "Input file path: " << input_path << std::endl;
-    //std::cout << "Output file path: " << output_path << std::endl;
-    //std::cout << "Editcap path: " << editcap_path << std::endl;
-    
-    // 切换到文件所在目录
-    std::string current_dir = std::filesystem::current_path().string();
-    std::filesystem::current_path(input_path.parent_path());
-    
-    // 构建命令，使用相对路径
-    std::string command = editcap_path + " -F pcap " + 
-                         input_path.filename().string() + " " + 
-                         output_path.filename().string();
-    //std::cout << "Converting pcapng to pcap: " << command << std::endl;
-    
-    int result = system(command.c_str());
-    if (result != 1) {
-        std::cerr << "Command execution failed with error code: " << result << std::endl;
+
+    // 5. 自动创建输出目录（增强错误处理）
+    try {
+        std::filesystem::create_directories(output_path.parent_path());
+    }
+    catch (const std::exception& e) {
+        log(LogLevel::LOG_ERROR, "Cannot create output directory: " + std::string(e.what()));
         return "";
     }
-    
-    // 恢复原目录
-    std::filesystem::current_path(current_dir);
-    
-    // 检查输出文件是否存在
-    if (std::filesystem::exists(output_path)) {
-        //std::cout << "Successfully created pcap file: " << output_path << std::endl;
-        return output_path.string();
-    } else {
-        std::cerr << "Failed to create pcap file" << std::endl;
+
+    // 4. 调试信息增强
+    //std::cout << "[DEBUG] Current dir: " << std::filesystem::current_path() << "\n"
+    //    << "[DEBUG] Input file: " << input_path << "\n"
+    //    << "[DEBUG] Output file: " << output_path << "\n"
+    //    << "[DEBUG] Editcap path: " << editcap_path << "\n"
+    //    << "[DEBUG] Editcap exists: " << std::filesystem::exists(editcap_path) << std::endl;
+
+    // 5. 构建命令（参数顺序修正）
+    std::string cmd = "\"" + editcap_path + "\" \"" + input_path.string() + "\" \"" +
+        output_path.string() + "\" -F pcap";
+    //std::cout << "[DEBUG] Execute: " << cmd << std::endl;
+
+    // 6. 错误输出捕获设置
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE hRead, hWrite;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+        log(LogLevel::LOG_ERROR, "CreatePipe failed: " + std::to_string(GetLastError()));
         return "";
     }
+
+    // 7. 进程创建配置
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdError = hWrite;
+    si.hStdOutput = hWrite;
+
+    // 8. 工作目录设置
+    std::string working_dir = std::filesystem::path(editcap_path).parent_path().string();
+
+    // 9. 创建进程
+    std::vector<char> cmd_vec(cmd.begin(), cmd.end());
+    cmd_vec.push_back('\0');
+
+    if (!CreateProcessA(
+        NULL, cmd_vec.data(), NULL, NULL, TRUE,
+        CREATE_NO_WINDOW, NULL, working_dir.c_str(), &si, &pi
+    )) {
+        log(LogLevel::LOG_ERROR, "CreateProcess failed: " + std::to_string(GetLastError()));
+        CloseHandle(hWrite);
+        CloseHandle(hRead);
+        return "";
+    }
+
+    // 10. 实时读取错误输出
+    CloseHandle(hWrite);
+    std::string error_output;
+    char buffer[4096];
+    DWORD bytes_read;
+
+    while (ReadFile(hRead, buffer, sizeof(buffer), &bytes_read, NULL) && bytes_read > 0) {
+        error_output.append(buffer, bytes_read);
+    }
+
+    // 11. 等待进程结束
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exit_code;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+
+    // 12. 输出错误信息（如果有）
+    if (!error_output.empty()) {
+        log(LogLevel::LOG_EDITCAP_OUTPUT, error_output);
+    }
+
+    // 13. 资源清理
+    CloseHandle(hRead);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // 14. 结果验证
+    if (exit_code != 0 || !std::filesystem::exists(output_path)) {
+        log(LogLevel::LOG_ERROR, "Conversion failed. Exit code: " + std::to_string(exit_code));
+        return "";
+    }
+
+    //std::cout << "[SUCCESS] Output file created: " << output_path << std::endl;
+    return output_path.string();
 }
 
-PCAPToLVX2::PCAPToLVX2(const std::string& pcap_file, const std::string& output_file)
-    : pcap_file_(pcap_file), output_file_(output_file), frame_index_(0), current_offset_(92) {}
+PCAPToLVX2::PCAPToLVX2(const std::string& input_file, const std::string& output_file)
+    : input_file_(input_file), output_file_(output_file), frame_index_(0), current_offset_(92) {}
 
 bool PCAPToLVX2::extractDeviceInfo(const std::vector<std::vector<uint8_t>>& all_raw_packets) {
     for (const auto& pkt_data : all_raw_packets) {
@@ -147,29 +281,44 @@ uint64_t PCAPToLVX2::getTimestampFromPayload(const std::vector<uint8_t>& payload
 }
 
 bool PCAPToLVX2::convert() {
-    //std::cout << "Opening file: " << pcap_file_ << std::endl;
-
-    std::string input_file = std::filesystem::absolute(pcap_file_).string();
-    if (isPcapngFile(input_file)) {
-        std::cout << "Detected pcapng format, converting to pcap, please wait..." << std::endl;
-        input_file = convertPcapngToPcap(input_file);
-        if (input_file.empty()) {
+    std::string input_file = std::filesystem::absolute(input_file_).string();
+    std::string intermediate_pcap;  // 存储中间文件的路径
+    bool is_pcapng = isPcapngFile(input_file);
+    
+    if (is_pcapng) {
+        log(LogLevel::LOG_INFO, "Detected pcapng format, converting to pcap, please wait...");
+        intermediate_pcap = convertPcapngToPcap(input_file);
+        if (intermediate_pcap.empty()) {
+            MessageBoxA(NULL, "转换 pcapng 到 pcap 格式失败。", "转换错误", MB_ICONERROR);
             return false;
         }
+        input_file = intermediate_pcap;  // 使用转换后的文件
     }
 
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* pcap = pcap_open_offline(input_file.c_str(), errbuf);
     if (!pcap) {
-        std::cerr << "Failed to open file: " << errbuf << std::endl;
+        std::string error_msg = "Failed to open file: " + std::string(errbuf);
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, ("打开文件失败: " + std::string(errbuf)).c_str(), "文件打开错误", MB_ICONERROR);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
     int linktype = pcap_datalink(pcap);
-    //std::cout << "Link layer type: " << linktype << std::endl;
     if (linktype != DLT_EN10MB) {
-        std::cerr << "Warning: Unsupported link type: " << linktype << std::endl;
-        std::cerr << "Expected Ethernet (DLT_EN10MB)" << std::endl;
+        std::string warning_msg = "Unsupported link type: " + std::to_string(linktype) + "\nExpected Ethernet (DLT_EN10MB)";
+        log(LogLevel::LOG_WARNING, warning_msg);
+        //MessageBoxA(NULL, ("不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (DLT_EN10MB)").c_str(), "警告", MB_ICONWARNING);
     }
 
     std::vector<std::vector<uint8_t>> all_raw_packets;
@@ -184,21 +333,47 @@ bool PCAPToLVX2::convert() {
     }
 
     if (result == -1) {
-        std::cerr << "Error reading packets: " << pcap_geterr(pcap) << std::endl;
+        std::string error_msg = "Error reading packets: " + std::string(pcap_geterr(pcap));
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, ("读取数据包时出错: " + std::string(pcap_geterr(pcap))).c_str(), "数据包读取错误", MB_ICONERROR);
         pcap_close(pcap);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
     pcap_close(pcap);
-    std::cout << "Read " << packet_count << " packets" << std::endl;
+    log(LogLevel::LOG_INFO, "Read " + std::to_string(packet_count) + " packets");
 
     if (all_raw_packets.empty()) {
-        std::cerr << "No packets found in the file." << std::endl;
+        std::string error_msg = "No packets found in the file.";
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, "文件中未找到数据包。", "转换错误", MB_ICONERROR);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
     if (!extractDeviceInfo(all_raw_packets)) {
-        std::cerr << "Warning: Failed to extract device information, using default values." << std::endl;
+        std::string warning_msg = "Failed to extract device information, using default values.";
+        log(LogLevel::LOG_WARNING, warning_msg);
+        //MessageBoxA(NULL, "无法从 PCAP 文件中提取到设备信息，将使用默认值。", "警告", MB_ICONWARNING);
     }
 
     bool point_data_found = false;
@@ -210,18 +385,54 @@ bool PCAPToLVX2::convert() {
         }
     }
     if (!point_data_found) {
-        std::cerr << "No point cloud data found from port 56300." << std::endl;
+        std::string error_msg = "No point cloud data found from port 56300.";
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, "PCAP 文件中未找到来自端口 56300 的点云数据。", "转换错误", MB_ICONERROR);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
     std::ofstream out_file(output_file_, std::ios::binary);
     if (!out_file) {
-        std::cerr << "Failed to open output file: " << output_file_ << std::endl;
+        std::string error_msg = "Failed to open output file: " + output_file_;
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, ("无法打开输出文件: " + output_file_).c_str(), "文件打开错误", MB_ICONERROR);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
     if (!LVX2Writer::writeHeaders(out_file, device_info_)) {
-        std::cerr << "Failed to write headers to output file." << std::endl;
+        std::string error_msg = "Failed to write headers to output file.";
+        log(LogLevel::LOG_ERROR, error_msg);
+        MessageBoxA(NULL, "写入文件头失败。", "转换错误", MB_ICONERROR);
+        if (is_pcapng && !intermediate_pcap.empty()) {
+            try {
+                if (std::filesystem::exists(intermediate_pcap)) {
+                    std::filesystem::remove(intermediate_pcap);
+                }
+            }
+            catch (const std::exception& e) {
+                log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+            }
+        }
         return false;
     }
 
@@ -242,13 +453,37 @@ bool PCAPToLVX2::convert() {
                         for (const auto& pkg : frame_packages_) frame_size += pkg.size();
                         uint64_t next_offset = current_offset_ + 24 + frame_size;
                         if (!LVX2Writer::writeFrameHeader(out_file, current_offset_, next_offset, frame_index_)) {
-                            std::cerr << "Failed to write frame header." << std::endl;
+                            std::string error_msg = "Failed to write frame header.";
+                            log(LogLevel::LOG_ERROR, error_msg);
+                            MessageBoxA(NULL, "写入 Frame Header 失败。", "转换错误", MB_ICONERROR);
+                            if (is_pcapng && !intermediate_pcap.empty()) {
+                                try {
+                                    if (std::filesystem::exists(intermediate_pcap)) {
+                                        std::filesystem::remove(intermediate_pcap);
+                                    }
+                                }
+                                catch (const std::exception& e) {
+                                    log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+                                }
+                            }
                             return false;
                         }
                         for (const auto& pkg : frame_packages_) {
                             out_file.write(reinterpret_cast<const char*>(pkg.data()), pkg.size());
                             if (out_file.fail()) {
-                                std::cerr << "Failed to write frame data." << std::endl;
+                                std::string error_msg = "Failed to write frame data.";
+                                log(LogLevel::LOG_ERROR, error_msg);
+                                MessageBoxA(NULL, "写入 Frame Data 失败。", "转换错误", MB_ICONERROR);
+                                if (is_pcapng && !intermediate_pcap.empty()) {
+                                    try {
+                                        if (std::filesystem::exists(intermediate_pcap)) {
+                                            std::filesystem::remove(intermediate_pcap);
+                                        }
+                                    }
+                                    catch (const std::exception& e) {
+                                        log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+                                    }
+                                }
                                 return false;
                             }
                         }
@@ -261,7 +496,9 @@ bool PCAPToLVX2::convert() {
                 std::vector<uint8_t> data(info.payload.begin() + 36, info.payload.end());
                 auto pkg_header = LVX2Writer::createPackageHeader(info.payload, data.size(), device_info_);
                 if (pkg_header.empty()) {
-                    std::cerr << "Failed to create package header." << std::endl;
+                    std::string error_msg = "Failed to write package header.";
+                    log(LogLevel::LOG_ERROR, error_msg);
+                    MessageBoxA(NULL, "写入 Package Header 失败。", "转换错误", MB_ICONERROR);
                     return false;
                 }
                 std::vector<uint8_t> pkg(pkg_header);
@@ -276,19 +513,60 @@ bool PCAPToLVX2::convert() {
         for (const auto& pkg : frame_packages_) frame_size += pkg.size();
         uint64_t next_offset = current_offset_ + 24 + frame_size;
         if (!LVX2Writer::writeFrameHeader(out_file, current_offset_, next_offset, frame_index_)) {
-            std::cerr << "Failed to write final frame header." << std::endl;
+            std::string error_msg = "Failed to write frame header.";
+            log(LogLevel::LOG_ERROR, error_msg);
+            MessageBoxA(NULL, "写入 Frame Header 失败。", "转换错误", MB_ICONERROR);
+            if (is_pcapng && !intermediate_pcap.empty()) {
+                try {
+                    if (std::filesystem::exists(intermediate_pcap)) {
+                        std::filesystem::remove(intermediate_pcap);
+                    }
+                }
+                catch (const std::exception& e) {
+                    log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+                }
+            }
             return false;
         }
         for (const auto& pkg : frame_packages_) {
             out_file.write(reinterpret_cast<const char*>(pkg.data()), pkg.size());
             if (out_file.fail()) {
-                std::cerr << "Failed to write final frame data." << std::endl;
+                std::string error_msg = "Failed to write frame data.";
+                log(LogLevel::LOG_ERROR, error_msg);
+                MessageBoxA(NULL, "写入 Frame Data 失败。", "转换错误", MB_ICONERROR);
+                if (is_pcapng && !intermediate_pcap.empty()) {
+                    try {
+                        if (std::filesystem::exists(intermediate_pcap)) {
+                            std::filesystem::remove(intermediate_pcap);
+                        }
+                    }
+                    catch (const std::exception& e) {
+                        log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
+                    }
+                }
                 return false;
             }
         }
     }
 
     out_file.close();
-    //std::cout << "Conversion completed successfully. Output file: " << output_file_ << std::endl;
+
+    log(LogLevel::LOG_SUCCESS, "Conversion completed successfully!");
+    log(LogLevel::LOG_INFO, "Output file location: " + std::filesystem::absolute(output_file_).string());
+    
+    // 如果是 pcapng 文件，删除中间转换的 pcap 文件
+    if (is_pcapng && !intermediate_pcap.empty()) {
+        try {
+            if (std::filesystem::exists(intermediate_pcap)) {
+                std::filesystem::remove(intermediate_pcap);
+            }
+        }
+        catch (const std::exception& e) {
+            std::string warning_msg = "Failed to delete intermediate file: " + std::string(e.what());
+            log(LogLevel::LOG_WARNING, warning_msg);
+            MessageBoxA(NULL, ("删除中间 PCAP 文件失败: " + std::string(e.what())).c_str(), "警告", MB_ICONWARNING);
+        }
+    }
+    
     return true;
 }
