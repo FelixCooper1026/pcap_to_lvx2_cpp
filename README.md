@@ -1,6 +1,6 @@
 # PCAP to LVX2 Converter
 
-一个用于将 PCAP/PCAPNG/CAP 文件转换为 LVX2 格式的工具，支持中文路径，提供图形界面。
+一个用于将 PCAP/PCAPNG 文件转换为 LVX2 格式的工具，支持中文路径，提供图形界面。
 
 ## 功能特点
 
