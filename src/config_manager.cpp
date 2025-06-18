@@ -9,7 +9,7 @@ ConfigManager& ConfigManager::getInstance() {
 }
 
 ConfigManager::ConfigManager() {
-    // 配置文件路径: %APPDATA%\pcap_to_lvx2\config.ini
+    // 配置文件路径: %APPDATA%\pcap_to_lvx2\editcap_path.ini
     wchar_t* appdata = nullptr;
     if (SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, NULL, &appdata) == S_OK) {
         // 转换为 std::filesystem::path 并处理路径
