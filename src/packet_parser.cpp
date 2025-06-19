@@ -26,6 +26,12 @@ PacketInfo PacketParser::parseRawUdpPacket(const std::vector<uint8_t>& pkt_data)
     info.src_port = (pkt_data[udp_header_start] << 8) | pkt_data[udp_header_start + 1];
     info.dst_port = (pkt_data[udp_header_start + 2] << 8) | pkt_data[udp_header_start + 3];
     info.payload = std::vector<uint8_t>(pkt_data.begin() + udp_header_start + 8, pkt_data.end());
+
+    info.src_ip = std::to_string(pkt_data[26]) + "." + std::to_string(pkt_data[27]) + "." +
+                  std::to_string(pkt_data[28]) + "." + std::to_string(pkt_data[29]);
+    info.dst_ip = std::to_string(pkt_data[30]) + "." + std::to_string(pkt_data[31]) + "." +
+                  std::to_string(pkt_data[32]) + "." + std::to_string(pkt_data[33]);
+
     return info;
 }
 

@@ -15,6 +15,7 @@
 #include <shellapi.h>
 #include <chrono>
 #include <iomanip>
+#include <map>
 
 // 日志级别枚举
 enum class LogLevel {
@@ -401,6 +402,26 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
+    // 收集所有唯一lidar_id的DeviceInfo
+    std::map<uint32_t, DeviceInfo> unique_devices;
+    for (const auto& pkt_data : all_raw_packets) {
+        PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+        if (info.payload.empty()) continue;
+        if (info.src_port == 56200 || info.dst_port == 56200) {
+            DeviceInfo tmp_info;
+            PacketParser::parseUdpPayload(info.payload, tmp_info);
+            if (!tmp_info.lidar_sn.empty() && tmp_info.lidar_sn != "DEFAULT_LIDAR") {
+                unique_devices[tmp_info.lidar_id] = tmp_info;
+            }
+        }
+    }
+    std::vector<DeviceInfo> device_infos;
+    for (const auto& kv : unique_devices) device_infos.push_back(kv.second);
+    if (device_infos.empty()) {
+        // fallback: 至少有一个默认
+        device_infos.push_back(device_info_);
+    }
+
     std::ofstream out_file(output_file_, std::ios::binary);
     if (!out_file) {
         std::string error_msg = "Failed to open output file: " + output_file_;
@@ -419,7 +440,7 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
-    if (!LVX2Writer::writeHeaders(out_file, device_info_)) {
+    if (!LVX2Writer::writeHeaders(out_file, device_infos)) {
         std::string error_msg = "Failed to write headers to output file.";
         log(LogLevel::LOG_ERROR, error_msg);
         MessageBoxA(NULL, "写入文件头失败。", "转换错误", MB_ICONERROR);
@@ -436,117 +457,88 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
-    frame_index_ = 0;
-    current_offset_ = 92;
-    frame_packages_.clear();
-    uint64_t last_timestamp = 0;
+    // 定义帧内package结构
+    struct FramePackage {
+        std::vector<uint8_t> payload;
+        DeviceInfo device_info;
+    };
+    std::vector<std::vector<FramePackage>> frames;
+    std::vector<FramePackage> current_frame;
+    uint64_t frame_start_ts = 0;
 
+    // 建立ip->DeviceInfo映射
+    std::map<std::string, DeviceInfo> ip2info;
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty()) continue;
-        if (info.src_port == 56300) {
-            if (info.payload.size() >= 36) {
-                uint64_t timestamp = getTimestampFromPayload(info.payload);
-                if (last_timestamp == 0 || timestamp - last_timestamp >= ns_threshold_) {
-                    if (!frame_packages_.empty()) {
-                        uint32_t frame_size = 0;
-                        for (const auto& pkg : frame_packages_) frame_size += pkg.size();
-                        uint64_t next_offset = current_offset_ + 24 + frame_size;
-                        if (!LVX2Writer::writeFrameHeader(out_file, current_offset_, next_offset, frame_index_)) {
-                            std::string error_msg = "Failed to write frame header.";
-                            log(LogLevel::LOG_ERROR, error_msg);
-                            MessageBoxA(NULL, "写入 Frame Header 失败。", "转换错误", MB_ICONERROR);
-                            if (is_pcapng && !intermediate_pcap.empty()) {
-                                try {
-                                    if (std::filesystem::exists(intermediate_pcap)) {
-                                        std::filesystem::remove(intermediate_pcap);
-                                    }
-                                }
-                                catch (const std::exception& e) {
-                                    log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-                                }
-                            }
-                            return false;
-                        }
-                        for (const auto& pkg : frame_packages_) {
-                            out_file.write(reinterpret_cast<const char*>(pkg.data()), pkg.size());
-                            if (out_file.fail()) {
-                                std::string error_msg = "Failed to write frame data.";
-                                log(LogLevel::LOG_ERROR, error_msg);
-                                MessageBoxA(NULL, "写入 Frame Data 失败。", "转换错误", MB_ICONERROR);
-                                if (is_pcapng && !intermediate_pcap.empty()) {
-                                    try {
-                                        if (std::filesystem::exists(intermediate_pcap)) {
-                                            std::filesystem::remove(intermediate_pcap);
-                                        }
-                                    }
-                                    catch (const std::exception& e) {
-                                        log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-                                    }
-                                }
-                                return false;
-                            }
-                        }
-                        current_offset_ = next_offset;
-                        frame_index_++;
-                        frame_packages_.clear();
-                    }
-                    last_timestamp = timestamp;
-                }
-                std::vector<uint8_t> data(info.payload.begin() + 36, info.payload.end());
-                auto pkg_header = LVX2Writer::createPackageHeader(info.payload, data.size(), device_info_);
-                if (pkg_header.empty()) {
-                    std::string error_msg = "Failed to write package header.";
-                    log(LogLevel::LOG_ERROR, error_msg);
-                    MessageBoxA(NULL, "写入 Package Header 失败。", "转换错误", MB_ICONERROR);
-                    return false;
-                }
-                std::vector<uint8_t> pkg(pkg_header);
-                pkg.insert(pkg.end(), data.begin(), data.end());
-                frame_packages_.push_back(pkg);
+        if (info.src_port == 56200 || info.dst_port == 56200) {
+            DeviceInfo tmp_info;
+            PacketParser::parseUdpPayload(info.payload, tmp_info);
+            if (!tmp_info.lidar_sn.empty() && tmp_info.lidar_id != 0) {
+                ip2info[info.src_ip] = tmp_info;
             }
         }
     }
 
-    if (!frame_packages_.empty()) {
+    // 遍历点云包，按原始顺序分帧
+    for (const auto& pkt_data : all_raw_packets) {
+        PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+        if (info.payload.empty()) continue;
+        if (info.src_port == 56300 && info.payload.size() >= 36) {
+            auto it = ip2info.find(info.src_ip);
+            if (it == ip2info.end()) continue;
+            uint64_t timestamp = getTimestampFromPayload(info.payload);
+
+            if (current_frame.empty()) {
+                // 新开第一帧
+                frame_start_ts = timestamp;
+            }
+            if (timestamp >= frame_start_ts + ns_threshold_) {
+                // 超出当前帧区间，写入上一帧，开启新帧
+                frames.push_back(current_frame);
+                current_frame.clear();
+                frame_start_ts = timestamp;
+            }
+            current_frame.push_back(FramePackage{info.payload, it->second});
+        }
+    }
+    if (!current_frame.empty()) frames.push_back(current_frame);
+
+    // 写入所有帧
+    frame_index_ = 0;
+    size_t header_size = 24 + 5 + device_infos.size() * 63;
+    current_offset_ = header_size;
+    for (const auto& frame : frames) {
         uint32_t frame_size = 0;
-        for (const auto& pkg : frame_packages_) frame_size += pkg.size();
+        std::vector<std::vector<uint8_t>> pkgs;
+        for (const auto& pkg : frame) {
+            std::vector<uint8_t> data(pkg.payload.begin() + 36, pkg.payload.end());
+            auto pkg_header = LVX2Writer::createPackageHeader(pkg.payload, data.size(), pkg.device_info);
+            if (pkg_header.empty()) continue;
+            std::vector<uint8_t> pkg_bytes(pkg_header);
+            pkg_bytes.insert(pkg_bytes.end(), data.begin(), data.end());
+            pkgs.push_back(pkg_bytes);
+            frame_size += pkg_bytes.size();
+        }
+        if (pkgs.empty()) continue;
         uint64_t next_offset = current_offset_ + 24 + frame_size;
         if (!LVX2Writer::writeFrameHeader(out_file, current_offset_, next_offset, frame_index_)) {
             std::string error_msg = "Failed to write frame header.";
             log(LogLevel::LOG_ERROR, error_msg);
             MessageBoxA(NULL, "写入 Frame Header 失败。", "转换错误", MB_ICONERROR);
-            if (is_pcapng && !intermediate_pcap.empty()) {
-                try {
-                    if (std::filesystem::exists(intermediate_pcap)) {
-                        std::filesystem::remove(intermediate_pcap);
-                    }
-                }
-                catch (const std::exception& e) {
-                    log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-                }
-            }
             return false;
         }
-        for (const auto& pkg : frame_packages_) {
+        for (const auto& pkg : pkgs) {
             out_file.write(reinterpret_cast<const char*>(pkg.data()), pkg.size());
             if (out_file.fail()) {
                 std::string error_msg = "Failed to write frame data.";
                 log(LogLevel::LOG_ERROR, error_msg);
                 MessageBoxA(NULL, "写入 Frame Data 失败。", "转换错误", MB_ICONERROR);
-                if (is_pcapng && !intermediate_pcap.empty()) {
-                    try {
-                        if (std::filesystem::exists(intermediate_pcap)) {
-                            std::filesystem::remove(intermediate_pcap);
-                        }
-                    }
-                    catch (const std::exception& e) {
-                        log(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-                    }
-                }
                 return false;
             }
         }
+        current_offset_ = next_offset;
+        frame_index_++;
     }
 
     out_file.close();

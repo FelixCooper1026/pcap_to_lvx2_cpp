@@ -1,7 +1,7 @@
 #include "lvx2_writer.h"
 #include <cstring>
 
-bool LVX2Writer::writeHeaders(std::ofstream& file, const DeviceInfo& device_info) {
+bool LVX2Writer::writeHeaders(std::ofstream& file, const std::vector<DeviceInfo>& device_infos) {
     // 公共头
     char signature[16] = "livox_tech";
     file.write(signature, 16);
@@ -13,27 +13,38 @@ bool LVX2Writer::writeHeaders(std::ofstream& file, const DeviceInfo& device_info
     // 私有头
     uint32_t duration = 50;
     file.write(reinterpret_cast<char*>(&duration), 4);
-    uint8_t device_count = 1;
+    uint8_t device_count = static_cast<uint8_t>(device_infos.size());
     file.write(reinterpret_cast<char*>(&device_count), 1);
 
     // 设备信息
-    std::string lidar_sn = device_info.lidar_sn;
-    lidar_sn.resize(16, '\0');
-    file.write(lidar_sn.c_str(), 16);
-    std::string hub_sn = device_info.hub_sn;
-    hub_sn.resize(16, '\0');
-    file.write(hub_sn.c_str(), 16);
-    file.write(reinterpret_cast<const char*>(&device_info.lidar_id), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.lidar_type), 1);
-    file.write(reinterpret_cast<const char*>(&device_info.device_type), 1);
-    uint8_t enable_extrinsic = device_info.enable_extrinsic ? 1 : 0;
-    file.write(reinterpret_cast<char*>(&enable_extrinsic), 1);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_roll), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_pitch), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_yaw), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_x), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_y), 4);
-    file.write(reinterpret_cast<const char*>(&device_info.offset_z), 4);
+    for (const auto& device_info : device_infos) {
+        std::string lidar_sn = device_info.lidar_sn;
+        lidar_sn.resize(16, '\0');
+        file.write(lidar_sn.c_str(), 16);
+        std::string hub_sn = device_info.hub_sn;
+        hub_sn.resize(16, '\0');
+        file.write(hub_sn.c_str(), 16);
+        uint32_t lidar_id_le = 
+            ((device_info.lidar_id & 0xFF) << 24) |
+            ((device_info.lidar_id & 0xFF00) << 8) |
+            ((device_info.lidar_id & 0xFF0000) >> 8) |
+            ((device_info.lidar_id & 0xFF000000) >> 24);
+        file.write(reinterpret_cast<const char*>(&lidar_id_le), 4);
+        file.write(reinterpret_cast<const char*>(&device_info.lidar_type), 1);
+        file.write(reinterpret_cast<const char*>(&device_info.device_type), 1);
+        uint8_t enable_extrinsic = device_info.enable_extrinsic ? 1 : 0;
+        file.write(reinterpret_cast<char*>(&enable_extrinsic), 1);
+        file.write(reinterpret_cast<const char*>(&device_info.offset_roll), 4);
+        file.write(reinterpret_cast<const char*>(&device_info.offset_pitch), 4);
+        file.write(reinterpret_cast<const char*>(&device_info.offset_yaw), 4);
+        // 自动转换为cm再写入
+        float offset_x_cm = device_info.offset_x * 100.0f;
+        float offset_y_cm = device_info.offset_y * 100.0f;
+        float offset_z_cm = device_info.offset_z * 100.0f;
+        file.write(reinterpret_cast<const char*>(&offset_x_cm), 4);
+        file.write(reinterpret_cast<const char*>(&offset_y_cm), 4);
+        file.write(reinterpret_cast<const char*>(&offset_z_cm), 4);
+    }
     return true;
 }
 
@@ -47,7 +58,12 @@ bool LVX2Writer::writeFrameHeader(std::ofstream& file, uint64_t current_offset, 
 std::vector<uint8_t> LVX2Writer::createPackageHeader(const std::vector<uint8_t>& raw_udp_payload, uint32_t data_length, const DeviceInfo& device_info) {
     std::vector<uint8_t> header(27, 0);
     header[0] = raw_udp_payload[0];
-    memcpy(&header[1], &device_info.lidar_id, 4);
+    uint32_t lidar_id_le = 
+        ((device_info.lidar_id & 0xFF) << 24) |
+        ((device_info.lidar_id & 0xFF00) << 8) |
+        ((device_info.lidar_id & 0xFF0000) >> 8) |
+        ((device_info.lidar_id & 0xFF000000) >> 24);
+    memcpy(&header[1], &lidar_id_le, 4);
     header[5] = 8;
     header[6] = raw_udp_payload[11];
     memcpy(&header[7], &raw_udp_payload[28], 8);

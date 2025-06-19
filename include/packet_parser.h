@@ -7,6 +7,8 @@ struct PacketInfo {
     std::vector<uint8_t> payload;
     uint16_t src_port;
     uint16_t dst_port;
+    std::string src_ip;
+    std::string dst_ip;
 };
 
 class PacketParser {
