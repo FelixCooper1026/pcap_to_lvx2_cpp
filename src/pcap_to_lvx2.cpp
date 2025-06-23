@@ -402,24 +402,61 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
-    // 收集所有唯一lidar_id的DeviceInfo
-    std::map<uint32_t, DeviceInfo> unique_devices;
+    // --- Device Info Collection and IP Mapping ---
+    std::vector<DeviceInfo> device_infos;
+    std::map<std::string, DeviceInfo> ip2info;
+    std::map<uint32_t, std::string> lidar_id_to_ip; // Helper to avoid duplicate devices with same lidar_id
+
+    // 1. Try to get info from device info packets (port 56200)
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
-        if (info.payload.empty()) continue;
+        if (info.payload.empty() || info.src_ip.empty()) continue;
+
         if (info.src_port == 56200 || info.dst_port == 56200) {
             DeviceInfo tmp_info;
             PacketParser::parseUdpPayload(info.payload, tmp_info);
-            if (!tmp_info.lidar_sn.empty() && tmp_info.lidar_sn != "DEFAULT_LIDAR") {
-                unique_devices[tmp_info.lidar_id] = tmp_info;
+            if (!tmp_info.lidar_sn.empty()) {
+                if (lidar_id_to_ip.find(tmp_info.lidar_id) == lidar_id_to_ip.end()) {
+                    lidar_id_to_ip[tmp_info.lidar_id] = info.src_ip;
+                    ip2info[info.src_ip] = tmp_info;
+                }
             }
         }
     }
-    std::vector<DeviceInfo> device_infos;
-    for (const auto& kv : unique_devices) device_infos.push_back(kv.second);
+
+    for (const auto& kv : ip2info) {
+        device_infos.push_back(kv.second);
+    }
+    
+    // 2. Fallback: if no device info, infer from point cloud packet source IPs
     if (device_infos.empty()) {
-        // fallback: 至少有一个默认
-        device_infos.push_back(device_info_);
+        std::map<std::string, int> unique_src_ips;
+        for (const auto& pkt_data : all_raw_packets) {
+            PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+            if (info.src_port == 56300 && !info.src_ip.empty()) {
+                unique_src_ips[info.src_ip] = 1;
+            }
+        }
+
+        if (!unique_src_ips.empty()) {
+            for (auto const& [ip_str, val] : unique_src_ips) {
+                DeviceInfo default_info;
+                std::string ip_for_sn = ip_str;
+                std::replace(ip_for_sn.begin(), ip_for_sn.end(), '.', '_');
+                default_info.lidar_sn = ip_for_sn;
+                default_info.lidar_id = PacketParser::ipToLidarId(ip_str);
+                device_infos.push_back(default_info);
+                ip2info[ip_str] = default_info;
+            }
+        }
+    }
+
+    // 3. Final fallback: if still no devices found, use a single IP-based default (should rarely happen)
+    if (device_infos.empty()) {
+        DeviceInfo default_info;
+        default_info.lidar_sn = "LIDAR_UNKNOWN";
+        default_info.lidar_id = 0;
+        device_infos.push_back(default_info);
     }
 
     std::ofstream out_file(output_file_, std::ios::binary);
@@ -465,20 +502,6 @@ bool PCAPToLVX2::convert() {
     std::vector<std::vector<FramePackage>> frames;
     std::vector<FramePackage> current_frame;
     uint64_t frame_start_ts = 0;
-
-    // 建立ip->DeviceInfo映射
-    std::map<std::string, DeviceInfo> ip2info;
-    for (const auto& pkt_data : all_raw_packets) {
-        PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
-        if (info.payload.empty()) continue;
-        if (info.src_port == 56200 || info.dst_port == 56200) {
-            DeviceInfo tmp_info;
-            PacketParser::parseUdpPayload(info.payload, tmp_info);
-            if (!tmp_info.lidar_sn.empty() && tmp_info.lidar_id != 0) {
-                ip2info[info.src_ip] = tmp_info;
-            }
-        }
-    }
 
     // 遍历点云包，按原始顺序分帧
     for (const auto& pkt_data : all_raw_packets) {

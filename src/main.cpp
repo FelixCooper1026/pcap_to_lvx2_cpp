@@ -10,6 +10,23 @@
 
 #pragma comment(lib, "user32.lib")
 
+BOOL WINAPI ConsoleHandler(DWORD signal) {
+    switch (signal) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            // 这里可以做资源释放、日志等操作
+            // 避免弹窗
+            // 例如：std::cout << "Console is closing, cleaning up..." << std::endl;
+            ExitProcess(0);
+            return TRUE;
+        default:
+            return FALSE;
+    }
+}
+
 std::string selectPcapFile() {
     OPENFILENAMEW ofn;
     wchar_t szFile[260] = { 0 };
@@ -58,6 +75,7 @@ void waitForExit() {
 }
 
 int main(int argc, char* argv[]) {
+    SetConsoleCtrlHandler(ConsoleHandler, TRUE);
     // 设置控制台输出代码页为 UTF-8
     SetConsoleOutputCP(CP_UTF8);
     // 确保输出不被缓冲
