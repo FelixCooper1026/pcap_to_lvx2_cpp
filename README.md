@@ -1,73 +1,25 @@
-# PCAP to LVX2 Converter
+# Livox PCAP 提取点云(LVX2) / IMU(CSV) 工具
 
-一个用于将 Livox 激光雷达通过 Wireshark/Tcpdump 捕获的 PCAP 格式数据转换为 LVX2 格式的工具，后者可在官方上位机软件 Livox Viewer2 中直接读取。支持中文路径，提供图形界面操作。
+## 简介
+一个用于提取（通过 Wireshark/Tcpdump 捕获的）Livox 激光雷达 PCAP 格式数据的工具。支持点云数据提取为 LVX2 格式，后者可在官方上位机软件 Livox Viewer2 中直接读取。同时支持提取 IMU 数据为 CSV 格式。支持中文路径，提供图形界面操作。
 
-## 功能特点
-
-- 支持 PCAP、PCAPNG 和 CAP 格式文件转换
-- 支持中文路径
-- 提供图形界面文件选择
-- 支持命令行操作
-- 自动管理 editcap 路径配置
-- 中文错误提示弹窗
-- 自动清理中间文件
-- 转换成功后自动打开输出文件夹
-
-## 系统要求
-
-- Windows 10 或更高版本
-- Visual C++ 2022 Runtime
-- Npcap（用于网络数据包捕获）
-- Wireshark-editcap
-
-## 安装步骤
-
-1. 下载最新版本的安装包
-2. 运行安装程序，按照提示完成安装
-3. 如果提示缺少依赖，请安装：
-   - Visual C++ 2022 Runtime
-   - Npcap
-   - Wireshark
+## 功能
+- 点云数据转为 LVX2：多雷达数据自动识别，保存为标准 lvx2
+- IMU数据 转为 CSV：提取 pcap 中的 IMU 数据并保存为 csv
+- 全中文界面和日志
 
 ## 使用方法
-
-### 图形界面
-
-1. 双击运行程序
-2. 在弹出的文件选择对话框中选择要转换的 PCAP/PCAPNG/CAP 文件
-3. 首次运行时，需要选择 editcap.exe 的路径（通常位于 Wireshark 安装目录）
-4. 等待转换完成
-5. 转换成功后会自动打开输出文件夹
-6. 转换后的文件将保存在原文件相同目录下，扩展名为 .lvx2
-
-### 命令行
-
-```bash
-PcaptoLVX2.exe <input_file>
-```
-
-例如：
-```bash
-PcaptoLVX2.exe data.pcap
-```
-
-## 配置管理
-
-程序会自动保存 editcap.exe 的路径配置：
-- 配置文件位置：`%APPDATA%/pcap_to_lvx2/editcap_path.ini`
-- 首次运行时会提示选择路径
-- 如需更改路径：
-  1. 删除配置文件
-  2. 重新运行程序
-  3. 选择新的 editcap.exe 路径
+1. 运行程序。
+2. 点击"选择文件"按钮，选取 PCAP/PCAPNG/CAP 文件
+3. 点击"点云转LVX2"按钮，自动完成转换，日志区显示进度与结果
+4. 点击"IMU导出CSV"按钮，自动提取 IMU 数据为 CSV 文件
+5. 点击"退出"按钮或关闭窗口。
 
 ## 注意事项
-
+- 首次运行时，需要选择 editcap.exe 的路径（通常位于 Wireshark 安装目录）
 - 转换过程中请勿关闭程序
-- 如果遇到错误，会显示中文错误提示弹窗
 - 选择 PCAPNG 文件时，程序会先转换为 PCAP 中间文件，确保有足够的磁盘空间
-- 转换 LVX2 成功或失败时会自动清理 PCAP 中间文件
-- 转换 LVX2 成功后会自动打开输出文件夹
+- 文件转换成功后会自动打开输出文件夹
 
 ## 常见问题
 
@@ -84,23 +36,18 @@ PcaptoLVX2.exe data.pcap
    - 确保 Wireshark 已正确安装
    - 可以手动删除配置文件重新选择路径
 
-## 版本信息
+---
 
-- 版本：1.1.0
-- 发布日期：2025-06-17
-- 许可证：BSD-3-Clause License
+## 版本
+- 版本：1.2.0
+- 日期：2025-07-01
+- 许可证：BSD-3-Clause
 
-## 未来计划
-
-### 设备支持
-- [ ] 支持 Livox HAP 激光雷达
-
-### 功能增强
-- [ ] 支持多文件批量处理
-- [ ] 添加处理进度显示
-- [ ] 支持自定义输出目录
-
+## 计划
+- [ ] 支持 Livox HAP
+- [ ] 多文件批量处理
+- [ ] 进度显示
+- [ ] 自定义输出目录
 
 ## 许可证
-
-本项目采用 BSD-3-Clause 许可证。详情请查看 [LICENSE](LICENSE) 文件。 
+BSD-3-Clause，详见 [LICENSE](LICENSE)。 

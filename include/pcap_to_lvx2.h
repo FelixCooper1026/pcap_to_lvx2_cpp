@@ -9,11 +9,11 @@ class PCAPToLVX2 {
 public:
     PCAPToLVX2(const std::string& input_file, const std::string& output_file);
     bool convert();
-
-private:
     std::string convertPcapngToPcap(const std::string& pcapng_file);
     bool isPcapFile(const std::string& filename);
     bool isPcapngFile(const std::string& filename);
+
+private:
     bool extractDeviceInfo(const std::vector<std::vector<uint8_t>>& packets);
     uint64_t getTimestampFromPayload(const std::vector<uint8_t>& payload);
 
