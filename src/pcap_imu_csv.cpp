@@ -1,5 +1,6 @@
 ﻿#include "packet_parser.h"
 #include "pcap_to_lvx2.h"
+#include "device_info.h"
 #include <pcap.h>
 #include <fstream>
 #include <iostream>
@@ -61,18 +62,52 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
         return false;
     }
 
-    std::vector<ImuDataRow> imu_rows;
+    // 首先检测设备类型
+    LivoxDeviceType detected_device_type = LivoxDeviceType::MID_360; // 默认值
+    bool imu_data_found = false;
+    
+    // 读取所有数据包来检测设备类型
+    std::vector<std::vector<uint8_t>> all_raw_packets;
     struct pcap_pkthdr* header;
     const u_char* data;
     int result;
+    
+    while ((result = pcap_next_ex(pcap, &header, &data)) > 0) {
+        all_raw_packets.emplace_back(data, data + header->caplen);
+    }
+    
+    // 检测设备类型（通过点云端口）
+    for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+        for (const auto& pkt_data : all_raw_packets) {
+            PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+            if (info.src_port == config.point_cloud_port) {
+                detected_device_type = device_type;
+                logToDialog(LogLevel::LOG_INFO, "检测到设备类型: " + config.device_name + "，将提取IMU数据");
+                break;
+            }
+        }
+        if (detected_device_type != LivoxDeviceType::MID_360) break;
+    }
+    
+    // 重新打开文件进行IMU数据提取
+    pcap_close(pcap);
+    pcap = pcap_open_offline(input_file.c_str(), errbuf);
+    if (!pcap) {
+        logToDialog(LogLevel::LOG_ERROR, "重新打开文件失败： " + input_file + ", 错误： " + errbuf);
+        return false;
+    }
+    
+    std::vector<ImuDataRow> imu_rows;
     uint32_t packet_num = 0;
+    const auto& detected_config = DEVICE_CONFIGS.at(detected_device_type);
 
     while ((result = pcap_next_ex(pcap, &header, &data)) > 0) {
         packet_num++;
         std::vector<uint8_t> pkt_data(data, data + header->caplen);
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
-        if (info.payload.empty() || info.src_port != 56400) continue;
+        if (info.payload.empty() || info.src_port != detected_config.imu_port) continue;
         if (info.payload.size() < 60) continue;
+        
         // Livox IMU包头部解析
         uint8_t version = info.payload[0];
         uint16_t length = info.payload[1] | (info.payload[2] << 8);
@@ -83,6 +118,7 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
         uint8_t data_type = info.payload[11];
         uint8_t time_type = info.payload[12];
         if (version != 0 || length != 60 || data_type != 0) continue;
+        
         uint64_t timestamp = 0;
         memcpy(&timestamp, &info.payload[28], 8);
         float gyro_x, gyro_y, gyro_z, acc_x, acc_y, acc_z;
@@ -93,12 +129,19 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
         memcpy(&acc_y, &info.payload[52], 4);
         memcpy(&acc_z, &info.payload[56], 4);
         imu_rows.push_back({packet_num, udp_cnt, timestamp, gyro_x, gyro_y, gyro_z, acc_x, acc_y, acc_z});
+        imu_data_found = true;
     }
     pcap_close(pcap);
 
     // 写入CSV前判断是否有IMU数据
     if (imu_rows.empty()) {
-        logToDialog(LogLevel::LOG_ERROR, "PCAP 文件中未找到来自端口 56400 的 IMU 数据。");
+        std::string error_msg = "PCAP 文件中未找到来自端口 " + std::to_string(detected_config.imu_port) + 
+                               " 的 IMU 数据。支持的IMU端口: ";
+        for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+            error_msg += std::to_string(config.imu_port) + "(" + config.device_name + "), ";
+        }
+        error_msg = error_msg.substr(0, error_msg.length() - 2); // 移除最后的逗号和空格
+        logToDialog(LogLevel::LOG_ERROR, error_msg);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
                 if (std::filesystem::exists(intermediate_pcap)) {
@@ -134,8 +177,6 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
             << std::setprecision(8) << row.gyro_x << ',' << row.gyro_y << ',' << row.gyro_z << ','
             << row.acc_x << ',' << row.acc_y << ',' << row.acc_z << '\n';
     }
-    logToDialog(LogLevel::LOG_SUCCESS, "IMU数据已成功导出为CSV文件！");
-    logToDialog(LogLevel::LOG_INFO, "文件保存位置: " + csv_file);
     
     // 如果是 pcapng 文件，删除中间转换的 pcap 文件
     if (is_pcapng && !intermediate_pcap.empty()) {

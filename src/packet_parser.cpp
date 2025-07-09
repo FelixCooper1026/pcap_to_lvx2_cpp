@@ -46,7 +46,10 @@ void PacketParser::parseUdpPayload(const std::vector<uint8_t>& payload, DeviceIn
 
         if (key == 0x8000) { // SN
             device_info.lidar_sn = std::string(payload.begin() + index, payload.begin() + index + length);
-            device_info.lidar_sn.erase(device_info.lidar_sn.find('\0'));
+            size_t null_pos = device_info.lidar_sn.find('\0');
+            if (null_pos != std::string::npos) {
+                device_info.lidar_sn.erase(null_pos);
+            }
         } else if (key == 0x0004 && length >= 4) { // lidar_ipcfg
             std::string ip = std::to_string(payload[index]) + "." +
                              std::to_string(payload[index + 1]) + "." +

@@ -248,10 +248,23 @@ bool PCAPToLVX2::extractDeviceInfo(const std::vector<std::vector<uint8_t>>& all_
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty()) continue;
-        if (info.src_port == 56200 || info.dst_port == 56200) {
-            PacketParser::parseUdpPayload(info.payload, device_info_);
-            if (!device_info_.lidar_sn.empty() && device_info_.lidar_sn != "DEFAULT_LIDAR")
-                return true;
+        
+        // 检查所有设备的推送数据端口
+        for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+            if (info.src_port == config.push_data_port || info.dst_port == config.push_data_port) {
+                // HAP设备需要特殊处理：只有长度=333的数据包才是推送数据
+                if (device_type == LivoxDeviceType::HAP && info.payload.size() < 333) {
+                    continue;
+                }
+                
+                PacketParser::parseUdpPayload(info.payload, device_info_);
+                if (!device_info_.lidar_sn.empty() && device_info_.lidar_sn != "DEFAULT_LIDAR") {
+                    // 使用对应设备类型的配置
+                    device_info_.lidar_type = config.lidar_type;
+                    device_info_.device_type = config.device_type;
+                    return true;
+                }
+            }
         }
     }
     return false;
@@ -362,18 +375,31 @@ bool PCAPToLVX2::convert() {
         //MessageBoxA(NULL, "无法从 PCAP 文件中提取到设备信息，将使用默认值。", "警告", MB_ICONWARNING);
     }
 
+    // 自动检测设备类型
+    LivoxDeviceType detected_device_type = LivoxDeviceType::MID_360; // 默认值
     bool point_data_found = false;
-    for (const auto& pkt_data : all_raw_packets) {
-        PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
-        if (info.src_port == 56300) {
-            point_data_found = true;
-            break;
+    
+    // 检查所有支持的点云端口
+    for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+        for (const auto& pkt_data : all_raw_packets) {
+            PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+            if (info.src_port == config.point_cloud_port) {
+                detected_device_type = device_type;
+                point_data_found = true;
+                logToDialog(LogLevel::LOG_INFO, "检测到设备类型: " + config.device_name + " (端口: " + std::to_string(config.point_cloud_port) + ")");
+                break;
+            }
         }
+        if (point_data_found) break;
     }
+    
     if (!point_data_found) {
-        std::string error_msg = "PCAP 文件中未找到来自端口 56300 的点云数据。";
+        std::string error_msg = "PCAP 文件中未找到支持的点云数据端口。支持的端口: ";
+        for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+            error_msg += std::to_string(config.point_cloud_port) + "(" + config.device_name + "), ";
+        }
+        error_msg = error_msg.substr(0, error_msg.length() - 2); // 移除最后的逗号和空格
         logToDialog(LogLevel::LOG_ERROR, error_msg);
-        //MessageBoxA(NULL, "PCAP 文件中未找到来自端口 56300 的点云数据。", "转换错误", MB_ICONERROR);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
                 if (std::filesystem::exists(intermediate_pcap)) {
@@ -391,19 +417,34 @@ bool PCAPToLVX2::convert() {
     std::vector<DeviceInfo> device_infos;
     std::map<std::string, DeviceInfo> ip2info;
     std::map<uint32_t, std::string> lidar_id_to_ip; // Helper to avoid duplicate devices with same lidar_id
+    
+    // 获取检测到的设备配置（只定义一次）
+    const auto& detected_config = DEVICE_CONFIGS.at(detected_device_type);
 
-    // 1. Try to get info from device info packets (port 56200)
+    // 1. Try to get info from device info packets (push data ports)
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty() || info.src_ip.empty()) continue;
 
-        if (info.src_port == 56200 || info.dst_port == 56200) {
-            DeviceInfo tmp_info;
-            PacketParser::parseUdpPayload(info.payload, tmp_info);
-            if (!tmp_info.lidar_sn.empty()) {
-                if (lidar_id_to_ip.find(tmp_info.lidar_id) == lidar_id_to_ip.end()) {
-                    lidar_id_to_ip[tmp_info.lidar_id] = info.src_ip;
-                    ip2info[info.src_ip] = tmp_info;
+        // 检查所有设备的推送数据端口
+        for (const auto& [device_type, config] : DEVICE_CONFIGS) {
+            if (info.src_port == config.push_data_port || info.dst_port == config.push_data_port) {
+                // HAP设备需要特殊处理：只有长度=333的数据包才是推送数据
+                if (device_type == LivoxDeviceType::HAP && info.payload.size() < 333) {
+                    continue;
+                }
+                DeviceInfo tmp_info;
+                PacketParser::parseUdpPayload(info.payload, tmp_info);
+                if (!tmp_info.lidar_sn.empty()) {
+                    if (lidar_id_to_ip.find(tmp_info.lidar_id) == lidar_id_to_ip.end()) {
+                        // 使用对应设备类型的配置
+                        tmp_info.lidar_type = config.lidar_type;
+                        tmp_info.device_type = config.device_type;
+                        lidar_id_to_ip[tmp_info.lidar_id] = info.src_ip;
+                        ip2info[info.src_ip] = tmp_info;
+                        logToDialog(LogLevel::LOG_INFO, "从端口 " + std::to_string(config.push_data_port) +
+                                  " 获取到设备信息: " + config.device_name + ", SN: " + tmp_info.lidar_sn + ", IP: " + info.src_ip);
+                    }
                 }
             }
         }
@@ -412,27 +453,35 @@ bool PCAPToLVX2::convert() {
     for (const auto& kv : ip2info) {
         device_infos.push_back(kv.second);
     }
+    logToDialog(LogLevel::LOG_INFO, "从推送数据端口获取到 " + std::to_string(device_infos.size()) + " 个设备信息");
     
-    // 2. Fallback: if no device info, infer from point cloud packet source IPs
-    if (device_infos.empty()) {
-        std::map<std::string, int> unique_src_ips;
-        for (const auto& pkt_data : all_raw_packets) {
-            PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
-            if (info.src_port == 56300 && !info.src_ip.empty()) {
+    // 2. Fallback: if no device info from push data ports, infer from point cloud packet source IPs
+    // 但只处理那些还没有设备信息的IP
+    std::map<std::string, int> unique_src_ips;
+    
+    for (const auto& pkt_data : all_raw_packets) {
+        PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
+        if (info.src_port == detected_config.point_cloud_port && !info.src_ip.empty()) {
+            // 只收集那些还没有设备信息的IP
+            if (ip2info.find(info.src_ip) == ip2info.end()) {
                 unique_src_ips[info.src_ip] = 1;
             }
         }
+    }
 
-        if (!unique_src_ips.empty()) {
-            for (auto const& [ip_str, val] : unique_src_ips) {
-                DeviceInfo default_info;
-                std::string ip_for_sn = ip_str;
-                std::replace(ip_for_sn.begin(), ip_for_sn.end(), '.', '_');
-                default_info.lidar_sn = ip_for_sn;
-                default_info.lidar_id = PacketParser::ipToLidarId(ip_str);
-                device_infos.push_back(default_info);
-                ip2info[ip_str] = default_info;
-            }
+    if (!unique_src_ips.empty()) {
+        for (auto const& [ip_str, val] : unique_src_ips) {
+            DeviceInfo default_info;
+            std::string ip_for_sn = ip_str;
+            std::replace(ip_for_sn.begin(), ip_for_sn.end(), '.', '_');
+            default_info.lidar_sn = ip_for_sn;
+            default_info.lidar_id = PacketParser::ipToLidarId(ip_str);
+            // 使用检测到的设备类型配置
+            default_info.lidar_type = detected_config.lidar_type;
+            default_info.device_type = detected_config.device_type;
+            device_infos.push_back(default_info);
+            ip2info[ip_str] = default_info;
+            logToDialog(LogLevel::LOG_INFO, "为IP " + ip_str + " 创建默认设备信息");
         }
     }
 
@@ -441,6 +490,9 @@ bool PCAPToLVX2::convert() {
         DeviceInfo default_info;
         default_info.lidar_sn = "LIDAR_UNKNOWN";
         default_info.lidar_id = 0;
+        // 使用检测到的设备类型配置
+        default_info.lidar_type = detected_config.lidar_type;
+        default_info.device_type = detected_config.device_type;
         device_infos.push_back(default_info);
     }
 
@@ -490,7 +542,7 @@ bool PCAPToLVX2::convert() {
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty()) continue;
-        if (info.src_port == 56300 && info.payload.size() >= 36) {
+        if (info.src_port == detected_config.point_cloud_port && info.payload.size() >= 36) {
             auto it = ip2info.find(info.src_ip);
             if (it == ip2info.end()) continue;
             uint64_t timestamp = getTimestampFromPayload(info.payload);
@@ -549,9 +601,6 @@ bool PCAPToLVX2::convert() {
 
     out_file.close();
 
-    logToDialog(LogLevel::LOG_SUCCESS, "LVX2转换成功！");
-    logToDialog(LogLevel::LOG_INFO, "文件保存位置: " + std::filesystem::absolute(output_file_).string());
-    
     // 如果是 pcapng 文件，删除中间转换的 pcap 文件
     if (is_pcapng && !intermediate_pcap.empty()) {
         try {
