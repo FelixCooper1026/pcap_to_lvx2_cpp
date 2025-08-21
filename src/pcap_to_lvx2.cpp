@@ -570,11 +570,54 @@ bool PCAPToLVX2::convert() {
         uint32_t frame_size = 0;
         std::vector<std::vector<uint8_t>> pkgs;
         for (const auto& pkg : frame) {
-            std::vector<uint8_t> data(pkg.payload.begin() + 36, pkg.payload.end());
-            auto pkg_header = LVX2Writer::createPackageHeader(pkg.payload, data.size(), pkg.device_info);
+            // 检测点云数据类型
+            PointCloudDataType data_type = PacketParser::detectPointCloudDataType(pkg.payload);
+            
+            // 记录检测到的数据类型（仅在第一次检测到时记录）
+            static bool logged_data_types[4] = {false, false, false, false};
+            if (!logged_data_types[static_cast<int>(data_type)]) {
+                std::string data_type_str;
+                switch (data_type) {
+                    case PointCloudDataType::CARTESIAN_32BIT:
+                        data_type_str = "数据类型1 (直角坐标，32位)";
+                        break;
+                    case PointCloudDataType::CARTESIAN_16BIT:
+                        data_type_str = "数据类型2 (直角坐标，16位)";
+                        break;
+                    case PointCloudDataType::SPHERICAL:
+                        data_type_str = "数据类型3 (球坐标)";
+                        break;
+                }
+                logToDialog(LogLevel::LOG_INFO, "检测到点云数据格式: " + data_type_str);
+                logged_data_types[static_cast<int>(data_type)] = true;
+            }
+            
+            // 处理点云数据
+            std::vector<uint8_t> processed_data;
+            bool convert_to_type1 = true;  // 默认转换为数据类型1
+            
+            if (data_type == PointCloudDataType::CARTESIAN_16BIT) {
+                // 数据类型2可以直接使用，不需要转换
+                processed_data = std::vector<uint8_t>(pkg.payload.begin() + 36, pkg.payload.end());
+                convert_to_type1 = false;
+            } else if (data_type == PointCloudDataType::SPHERICAL) {
+                // 球坐标需要转换为直角坐标（数据类型1）
+                processed_data = LVX2Writer::processPointCloudData(pkg.payload, data_type, true);
+                if (!processed_data.empty()) {
+                    // logToDialog(LogLevel::LOG_INFO, "球坐标数据已转换为直角坐标格式");
+                }
+            } else {
+                // 数据类型1直接使用
+                processed_data = std::vector<uint8_t>(pkg.payload.begin() + 36, pkg.payload.end());
+            }
+            
+            if (processed_data.empty()) continue;
+            
+            auto pkg_header = LVX2Writer::createPackageHeaderForDataType(pkg.payload, processed_data.size(), pkg.device_info, data_type);
             if (pkg_header.empty()) continue;
+            
             std::vector<uint8_t> pkg_bytes(pkg_header);
-            pkg_bytes.insert(pkg_bytes.end(), data.begin(), data.end());
+            pkg_bytes.insert(pkg_bytes.end(), processed_data.begin(), processed_data.end());
             pkgs.push_back(pkg_bytes);
             frame_size += pkg_bytes.size();
         }

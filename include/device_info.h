@@ -9,6 +9,29 @@ enum class LivoxDeviceType {
     HAP = 1
 };
 
+// 点云数据类型枚举
+enum class PointCloudDataType {
+    CARTESIAN_32BIT = 1,    // 数据类型1：直角坐标，32位，14字节
+    CARTESIAN_16BIT = 2,    // 数据类型2：直角坐标，16位，8字节
+    SPHERICAL = 3           // 数据类型3：球坐标，10字节
+};
+
+// 点云数据结构
+struct PointCloudPoint {
+    // 直角坐标 (数据类型1和2)
+    float x, y, z;          // 单位：mm (数据类型1) 或 10mm (数据类型2)
+    uint8_t reflectivity;   // 反射率
+    uint8_t tag;            // 标签
+    
+    // 球坐标 (数据类型3)
+    float depth;             // 深度，单位：mm
+    float zenith_angle;      // 天顶角，单位：度
+    float azimuth_angle;     // 方位角，单位：度
+    
+    PointCloudPoint() : x(0), y(0), z(0), reflectivity(0), tag(0), 
+                       depth(0), zenith_angle(0), azimuth_angle(0) {}
+};
+
 // 设备信息结构
 struct DeviceConfig {
     uint16_t point_cloud_port;

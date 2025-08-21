@@ -114,9 +114,9 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
         uint16_t time_interval = info.payload[3] | (info.payload[4] << 8);
         uint16_t dot_num = info.payload[5] | (info.payload[6] << 8);
         uint16_t udp_cnt = info.payload[7] | (info.payload[8] << 8);
-        uint16_t frame_cnt = info.payload[9] | (info.payload[10] << 8);
-        uint8_t data_type = info.payload[11];
-        uint8_t time_type = info.payload[12];
+        uint16_t frame_cnt = info.payload[9];
+        uint8_t data_type = info.payload[10];
+        uint8_t time_type = info.payload[11];
         if (version != 0 || length != 60 || data_type != 0) continue;
         
         uint64_t timestamp = 0;

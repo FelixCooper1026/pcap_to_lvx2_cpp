@@ -1,4 +1,5 @@
-#include "lvx2_writer.h"
+﻿#include "lvx2_writer.h"
+#include "packet_parser.h"
 #include <cstring>
 
 bool LVX2Writer::writeHeaders(std::ofstream& file, const std::vector<DeviceInfo>& device_infos) {
@@ -73,4 +74,65 @@ std::vector<uint8_t> LVX2Writer::createPackageHeader(const std::vector<uint8_t>&
     header[22] = raw_udp_payload[9];
     // header[23-26] 保持为0
     return header;
+}
+
+std::vector<uint8_t> LVX2Writer::createPackageHeaderForDataType(const std::vector<uint8_t>& raw_udp_payload, 
+                                                               uint32_t data_length, 
+                                                               const DeviceInfo& device_info,
+                                                               PointCloudDataType data_type) {
+    std::vector<uint8_t> header(27, 0);
+    header[0] = raw_udp_payload[0];
+    uint32_t lidar_id_le = 
+        ((device_info.lidar_id & 0xFF) << 24) |
+        ((device_info.lidar_id & 0xFF00) << 8) |
+        ((device_info.lidar_id & 0xFF0000) >> 8) |
+        ((device_info.lidar_id & 0xFF000000) >> 24);
+    memcpy(&header[1], &lidar_id_le, 4);
+    header[5] = 8;
+    header[6] = raw_udp_payload[11];
+    memcpy(&header[7], &raw_udp_payload[28], 8);
+    memcpy(&header[15], &raw_udp_payload[7], 2);
+    
+    // 根据数据类型设置相应的值
+    switch (data_type) {
+        case PointCloudDataType::CARTESIAN_32BIT:
+            header[17] = 1;  // 数据类型1
+            break;
+        case PointCloudDataType::CARTESIAN_16BIT:
+            header[17] = 2;  // 数据类型2
+            break;
+        case PointCloudDataType::SPHERICAL:
+            header[17] = 1;  // 球坐标转换为数据类型1
+            break;
+    }
+    
+    memcpy(&header[18], &data_length, 4);
+    header[22] = raw_udp_payload[9];
+    // header[23-26] 保持为0
+    return header;
+}
+
+std::vector<uint8_t> LVX2Writer::processPointCloudData(const std::vector<uint8_t>& raw_udp_payload, 
+                                                       PointCloudDataType data_type,
+                                                       bool convert_to_type1) {
+    // 解析点云数据
+    auto points = PacketParser::parsePointCloudData(raw_udp_payload, data_type);
+    
+    if (points.empty()) {
+        return std::vector<uint8_t>();
+    }
+    
+    // 如果是球坐标，需要转换为直角坐标
+    if (data_type == PointCloudDataType::SPHERICAL) {
+        points = PacketParser::convertSphericalToCartesian(points);
+    }
+    
+    // 根据convert_to_type1参数决定输出格式
+    if (convert_to_type1) {
+        // 转换为数据类型1（14字节/点）
+        return PacketParser::convertToDataType1(points);
+    } else {
+        // 转换为数据类型2（8字节/点）
+        return PacketParser::convertToDataType2(points);
+    }
 }

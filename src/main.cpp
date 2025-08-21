@@ -5,7 +5,7 @@
 #include <string>
 #include <shellapi.h>
 #include <windowsx.h>
-#include "resource.h"
+#include "../include/resource.h"
 #include <sstream>
 #include <ctime>
 #include "log_dialog.h"
