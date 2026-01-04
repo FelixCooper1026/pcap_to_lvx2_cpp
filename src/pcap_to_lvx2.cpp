@@ -283,7 +283,7 @@ bool PCAPToLVX2::convert() {
     std::string input_file = std::filesystem::absolute(input_file_).string();
     std::string intermediate_pcap;  // 存储中间文件的路径
     bool is_pcapng = isPcapngFile(input_file);
-    
+
     if (is_pcapng) {
         logToDialog(LogLevel::LOG_INFO, "检测到pcapng格式，正在转换为pcap，请稍候...");
         intermediate_pcap = convertPcapngToPcap(input_file);
@@ -299,7 +299,6 @@ bool PCAPToLVX2::convert() {
     if (!pcap) {
         std::string error_msg = "Failed to open file: " + std::string(errbuf);
         logToDialog(LogLevel::LOG_ERROR, "打开文件失败： " + input_file + ", 错误： " + errbuf);
-        //MessageBoxA(NULL, ("打开文件失败: " + std::string(errbuf)).c_str(), "文件打开错误", MB_ICONERROR);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
                 if (std::filesystem::exists(intermediate_pcap)) {
@@ -313,11 +312,23 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
+    // --- 优化部分：检测链路类型以支持 Linux SLL ---
     int linktype = pcap_datalink(pcap);
-    if (linktype != DLT_EN10MB) {
-        std::string warning_msg = "Unsupported link type: " + std::to_string(linktype) + "\nExpected Ethernet (DLT_EN10MB)";
+    bool is_linux_sll = false;
+
+    // 如果编译环境没有定义 DLT_LINUX_SLL (通常是 113)
+    const int SLL_TYPE = 113;
+
+    if (linktype == DLT_EN10MB) {
+        logToDialog(LogLevel::LOG_INFO, "链路类型: Ethernet (DLT_EN10MB)");
+    }
+    else if (linktype == SLL_TYPE) {
+        is_linux_sll = true;
+        logToDialog(LogLevel::LOG_INFO, "检测到 Linux Cooked Capture (SLL) 格式，将自动标准化为 Ethernet 帧。");
+    }
+    else {
+        std::string warning_msg = "不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (1) 或 SLL (113)";
         logToDialog(LogLevel::LOG_WARNING, "警告: " + warning_msg);
-        //MessageBoxA(NULL, ("不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (DLT_EN10MB)").c_str(), "警告", MB_ICONWARNING);
     }
 
     std::vector<std::vector<uint8_t>> all_raw_packets;
@@ -326,15 +337,40 @@ bool PCAPToLVX2::convert() {
     int result;
     int packet_count = 0;
 
+    // --- 优化部分：在读取时处理包头偏移 ---
     while ((result = pcap_next_ex(pcap, &header, &data)) > 0) {
-        all_raw_packets.emplace_back(data, data + header->caplen);
+        if (is_linux_sll) {
+            if (header->caplen >= 16) {
+                // 1. 获取 SLL 中的原始协议类型 (位于偏移量 14-15 字节)
+                uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 14);
+
+                // 2. 构造 14 字节的伪造以太网头
+                std::vector<uint8_t> normalized_pkt;
+                normalized_pkt.reserve(14 + (header->caplen - 16));
+
+                // 填充 12 字节 MAC 地址为 0
+                for (int i = 0; i < 12; ++i) normalized_pkt.push_back(0);
+
+                // 填充协议类型 (保持网络字节序)
+                normalized_pkt.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
+                normalized_pkt.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
+
+                // 3. 追加 IP 层及之后的所有原始数据 (跳过原 SLL 头的 16 字节)
+                normalized_pkt.insert(normalized_pkt.end(), data + 16, data + header->caplen);
+
+                all_raw_packets.emplace_back(std::move(normalized_pkt));
+            }
+        }
+        else {
+            // 标准以太网直接读取
+            all_raw_packets.emplace_back(data, data + header->caplen);
+        }
         packet_count++;
     }
 
     if (result == -1) {
         std::string error_msg = "读取数据包时出错: " + std::string(pcap_geterr(pcap));
         logToDialog(LogLevel::LOG_ERROR, "错误: " + error_msg);
-        //MessageBoxA(NULL, ("读取数据包时出错: " + std::string(pcap_geterr(pcap))).c_str(), "数据包读取错误", MB_ICONERROR);
         pcap_close(pcap);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
@@ -355,7 +391,6 @@ bool PCAPToLVX2::convert() {
     if (all_raw_packets.empty()) {
         std::string error_msg = "文件中未找到数据包。";
         logToDialog(LogLevel::LOG_ERROR, error_msg);
-        //MessageBoxA(NULL, "文件中未找到数据包。", "转换错误", MB_ICONERROR);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
                 if (std::filesystem::exists(intermediate_pcap)) {
@@ -369,17 +404,15 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
+    // 后续逻辑保持不变，因为 all_raw_packets 里的数据现在全是统一的以太网格式偏移了
     if (!extractDeviceInfo(all_raw_packets)) {
         std::string warning_msg = "无法从 PCAP 文件中提取到设备信息，将使用默认值。";
         logToDialog(LogLevel::LOG_WARNING, warning_msg);
-        //MessageBoxA(NULL, "无法从 PCAP 文件中提取到设备信息，将使用默认值。", "警告", MB_ICONWARNING);
     }
 
-    // 自动检测设备类型
-    LivoxDeviceType detected_device_type = LivoxDeviceType::MID_360; // 默认值
+    LivoxDeviceType detected_device_type = LivoxDeviceType::MID_360;
     bool point_data_found = false;
-    
-    // 检查所有支持的点云端口
+
     for (const auto& [device_type, config] : DEVICE_CONFIGS) {
         for (const auto& pkt_data : all_raw_packets) {
             PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
@@ -392,13 +425,13 @@ bool PCAPToLVX2::convert() {
         }
         if (point_data_found) break;
     }
-    
+
     if (!point_data_found) {
         std::string error_msg = "PCAP 文件中未找到支持的点云数据端口。支持的端口: ";
         for (const auto& [device_type, config] : DEVICE_CONFIGS) {
             error_msg += std::to_string(config.point_cloud_port) + "(" + config.device_name + "), ";
         }
-        error_msg = error_msg.substr(0, error_msg.length() - 2); // 移除最后的逗号和空格
+        error_msg = error_msg.substr(0, error_msg.length() - 2);
         logToDialog(LogLevel::LOG_ERROR, error_msg);
         if (is_pcapng && !intermediate_pcap.empty()) {
             try {
@@ -413,23 +446,17 @@ bool PCAPToLVX2::convert() {
         return false;
     }
 
-    // --- Device Info Collection and IP Mapping ---
     std::vector<DeviceInfo> device_infos;
     std::map<std::string, DeviceInfo> ip2info;
-    std::map<uint32_t, std::string> lidar_id_to_ip; // Helper to avoid duplicate devices with same lidar_id
-    
-    // 获取检测到的设备配置（只定义一次）
+    std::map<uint32_t, std::string> lidar_id_to_ip;
     const auto& detected_config = DEVICE_CONFIGS.at(detected_device_type);
 
-    // 1. Try to get info from device info packets (push data ports)
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty() || info.src_ip.empty()) continue;
 
-        // 检查所有设备的推送数据端口
         for (const auto& [device_type, config] : DEVICE_CONFIGS) {
             if (info.src_port == config.push_data_port || info.dst_port == config.push_data_port) {
-                // HAP设备需要特殊处理：只有长度=333的数据包才是推送数据
                 if (device_type == LivoxDeviceType::HAP && info.payload.size() < 333) {
                     continue;
                 }
@@ -437,13 +464,12 @@ bool PCAPToLVX2::convert() {
                 PacketParser::parseUdpPayload(info.payload, tmp_info);
                 if (!tmp_info.lidar_sn.empty()) {
                     if (lidar_id_to_ip.find(tmp_info.lidar_id) == lidar_id_to_ip.end()) {
-                        // 使用对应设备类型的配置
                         tmp_info.lidar_type = config.lidar_type;
                         tmp_info.device_type = config.device_type;
                         lidar_id_to_ip[tmp_info.lidar_id] = info.src_ip;
                         ip2info[info.src_ip] = tmp_info;
                         logToDialog(LogLevel::LOG_INFO, "从端口 " + std::to_string(config.push_data_port) +
-                                  " 获取到设备信息: " + config.device_name + ", SN: " + tmp_info.lidar_sn + ", IP: " + info.src_ip);
+                            " 获取到设备信息: " + config.device_name + ", SN: " + tmp_info.lidar_sn + ", IP: " + info.src_ip);
                     }
                 }
             }
@@ -453,16 +479,11 @@ bool PCAPToLVX2::convert() {
     for (const auto& kv : ip2info) {
         device_infos.push_back(kv.second);
     }
-    logToDialog(LogLevel::LOG_INFO, "从推送数据端口获取到 " + std::to_string(device_infos.size()) + " 个设备信息");
-    
-    // 2. Fallback: if no device info from push data ports, infer from point cloud packet source IPs
-    // 但只处理那些还没有设备信息的IP
+
     std::map<std::string, int> unique_src_ips;
-    
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.src_port == detected_config.point_cloud_port && !info.src_ip.empty()) {
-            // 只收集那些还没有设备信息的IP
             if (ip2info.find(info.src_ip) == ip2info.end()) {
                 unique_src_ips[info.src_ip] = 1;
             }
@@ -476,7 +497,6 @@ bool PCAPToLVX2::convert() {
             std::replace(ip_for_sn.begin(), ip_for_sn.end(), '.', '_');
             default_info.lidar_sn = ip_for_sn;
             default_info.lidar_id = PacketParser::ipToLidarId(ip_str);
-            // 使用检测到的设备类型配置
             default_info.lidar_type = detected_config.lidar_type;
             default_info.device_type = detected_config.device_type;
             device_infos.push_back(default_info);
@@ -485,12 +505,10 @@ bool PCAPToLVX2::convert() {
         }
     }
 
-    // 3. Final fallback: if still no devices found, use a single IP-based default (should rarely happen)
     if (device_infos.empty()) {
         DeviceInfo default_info;
         default_info.lidar_sn = "LIDAR_UNKNOWN";
         default_info.lidar_id = 0;
-        // 使用检测到的设备类型配置
         default_info.lidar_type = detected_config.lidar_type;
         default_info.device_type = detected_config.device_type;
         device_infos.push_back(default_info);
@@ -499,37 +517,14 @@ bool PCAPToLVX2::convert() {
     std::ofstream out_file(output_file_, std::ios::binary);
     if (!out_file) {
         logToDialog(LogLevel::LOG_ERROR, "无法打开输出文件: " + output_file_);
-        //MessageBoxA(NULL, ("无法打开输出文件: " + output_file_).c_str(), "文件打开错误", MB_ICONERROR);
-        if (is_pcapng && !intermediate_pcap.empty()) {
-            try {
-                if (std::filesystem::exists(intermediate_pcap)) {
-                    std::filesystem::remove(intermediate_pcap);
-                }
-            }
-            catch (const std::exception& e) {
-                logToDialog(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-            }
-        }
         return false;
     }
 
     if (!LVX2Writer::writeHeaders(out_file, device_infos)) {
         logToDialog(LogLevel::LOG_ERROR, "写入文件头失败。");
-        //MessageBoxA(NULL, "写入文件头失败。", "转换错误", MB_ICONERROR);
-        if (is_pcapng && !intermediate_pcap.empty()) {
-            try {
-                if (std::filesystem::exists(intermediate_pcap)) {
-                    std::filesystem::remove(intermediate_pcap);
-                }
-            }
-            catch (const std::exception& e) {
-                logToDialog(LogLevel::LOG_WARNING, "Failed to delete intermediate file: " + std::string(e.what()));
-            }
-        }
         return false;
     }
 
-    // 定义帧内package结构
     struct FramePackage {
         std::vector<uint8_t> payload;
         DeviceInfo device_info;
@@ -538,7 +533,6 @@ bool PCAPToLVX2::convert() {
     std::vector<FramePackage> current_frame;
     uint64_t frame_start_ts = 0;
 
-    // 遍历点云包，按原始顺序分帧
     for (const auto& pkt_data : all_raw_packets) {
         PacketInfo info = PacketParser::parseRawUdpPacket(pkt_data);
         if (info.payload.empty()) continue;
@@ -548,74 +542,55 @@ bool PCAPToLVX2::convert() {
             uint64_t timestamp = getTimestampFromPayload(info.payload);
 
             if (current_frame.empty()) {
-                // 新开第一帧
                 frame_start_ts = timestamp;
             }
             if (timestamp >= frame_start_ts + ns_threshold_) {
-                // 超出当前帧区间，写入上一帧，开启新帧
                 frames.push_back(current_frame);
                 current_frame.clear();
                 frame_start_ts = timestamp;
             }
-            current_frame.push_back(FramePackage{info.payload, it->second});
+            current_frame.push_back(FramePackage{ info.payload, it->second });
         }
     }
     if (!current_frame.empty()) frames.push_back(current_frame);
 
-    // 写入所有帧
     frame_index_ = 0;
     size_t header_size = 24 + 5 + device_infos.size() * 63;
     current_offset_ = header_size;
+
     for (const auto& frame : frames) {
         uint32_t frame_size = 0;
         std::vector<std::vector<uint8_t>> pkgs;
         for (const auto& pkg : frame) {
-            // 检测点云数据类型
             PointCloudDataType data_type = PacketParser::detectPointCloudDataType(pkg.payload);
-            
-            // 记录检测到的数据类型（仅在第一次检测到时记录）
-            static bool logged_data_types[4] = {false, false, false, false};
+            static bool logged_data_types[4] = { false, false, false, false };
             if (!logged_data_types[static_cast<int>(data_type)]) {
                 std::string data_type_str;
                 switch (data_type) {
-                    case PointCloudDataType::CARTESIAN_32BIT:
-                        data_type_str = "数据类型1 (直角坐标，32位)";
-                        break;
-                    case PointCloudDataType::CARTESIAN_16BIT:
-                        data_type_str = "数据类型2 (直角坐标，16位)";
-                        break;
-                    case PointCloudDataType::SPHERICAL:
-                        data_type_str = "数据类型3 (球坐标)";
-                        break;
+                case PointCloudDataType::CARTESIAN_32BIT: data_type_str = "数据类型1 (直角坐标，32位)"; break;
+                case PointCloudDataType::CARTESIAN_16BIT: data_type_str = "数据类型2 (直角坐标，16位)"; break;
+                case PointCloudDataType::SPHERICAL: data_type_str = "数据类型3 (球坐标)"; break;
                 }
                 logToDialog(LogLevel::LOG_INFO, "检测到点云数据格式: " + data_type_str);
                 logged_data_types[static_cast<int>(data_type)] = true;
             }
-            
-            // 处理点云数据
+
             std::vector<uint8_t> processed_data;
-            bool convert_to_type1 = true;  // 默认转换为数据类型1
-            
             if (data_type == PointCloudDataType::CARTESIAN_16BIT) {
-                // 数据类型2可以直接使用，不需要转换
-                processed_data = std::vector<uint8_t>(pkg.payload.begin() + 36, pkg.payload.end());
-                convert_to_type1 = false;
-            } else if (data_type == PointCloudDataType::SPHERICAL) {
-                // 球坐标需要转换为直角坐标（数据类型1）
-                processed_data = LVX2Writer::processPointCloudData(pkg.payload, data_type, true);
-                if (!processed_data.empty()) {
-                    // logToDialog(LogLevel::LOG_INFO, "球坐标数据已转换为直角坐标格式");
-                }
-            } else {
-                // 数据类型1直接使用
                 processed_data = std::vector<uint8_t>(pkg.payload.begin() + 36, pkg.payload.end());
             }
-            
+            else if (data_type == PointCloudDataType::SPHERICAL) {
+                processed_data = LVX2Writer::processPointCloudData(pkg.payload, data_type, true);
+            }
+            else {
+                processed_data = std::vector<uint8_t>(pkg.payload.begin() + 36, pkg.payload.end());
+            }
+
             if (processed_data.empty()) continue;
-            
+
             auto pkg_header = LVX2Writer::createPackageHeaderForDataType(pkg.payload, processed_data.size(), pkg.device_info, data_type);
             if (pkg_header.empty()) continue;
-            
+
             std::vector<uint8_t> pkg_bytes(pkg_header);
             pkg_bytes.insert(pkg_bytes.end(), processed_data.begin(), processed_data.end());
             pkgs.push_back(pkg_bytes);
@@ -624,17 +599,13 @@ bool PCAPToLVX2::convert() {
         if (pkgs.empty()) continue;
         uint64_t next_offset = current_offset_ + 24 + frame_size;
         if (!LVX2Writer::writeFrameHeader(out_file, current_offset_, next_offset, frame_index_)) {
-            std::string error_msg = "Failed to write frame header.";
-            logToDialog(LogLevel::LOG_ERROR, error_msg);
-            //MessageBoxA(NULL, "写入Frame Header失败。", "转换错误", MB_ICONERROR);
+            logToDialog(LogLevel::LOG_ERROR, "Failed to write frame header.");
             return false;
         }
         for (const auto& pkg : pkgs) {
             out_file.write(reinterpret_cast<const char*>(pkg.data()), pkg.size());
             if (out_file.fail()) {
-                std::string error_msg = "Failed to write frame data.";
-                logToDialog(LogLevel::LOG_ERROR, error_msg);
-                //MessageBoxA(NULL, "写入Frame Data失败。", "转换错误", MB_ICONERROR);
+                logToDialog(LogLevel::LOG_ERROR, "Failed to write frame data.");
                 return false;
             }
         }
@@ -644,7 +615,6 @@ bool PCAPToLVX2::convert() {
 
     out_file.close();
 
-    // 如果是 pcapng 文件，删除中间转换的 pcap 文件
     if (is_pcapng && !intermediate_pcap.empty()) {
         try {
             if (std::filesystem::exists(intermediate_pcap)) {
@@ -652,11 +622,9 @@ bool PCAPToLVX2::convert() {
             }
         }
         catch (const std::exception& e) {
-            std::string warning_msg = "删除中间 PCAP 文件失败: " + std::string(e.what());
-            logToDialog(LogLevel::LOG_WARNING, warning_msg);
-            //MessageBoxA(NULL, ("删除中间 PCAP 文件失败: " + std::string(e.what())).c_str(), "警告", MB_ICONWARNING);
+            logToDialog(LogLevel::LOG_WARNING, "删除中间 PCAP 文件失败: " + std::string(e.what()));
         }
     }
-    
+
     return true;
 }
