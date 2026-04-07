@@ -103,8 +103,11 @@
 
 ## 更新日志
 
+### v1.6.0
+- ✨ 新增支持 Linux cooked-mode capture2(SLL2:276)格式
+
 ### v1.5.0
-- ✨ 新增支持 Linux cooked-mode capture(SLL)格式
+- ✨ 新增支持 Linux cooked-mode capture(SLL:113)格式
 
 ### v1.4.0
 - ✨ 新增支持三种点云数据类型

@@ -316,18 +316,20 @@ bool PCAPToLVX2::convert() {
     int linktype = pcap_datalink(pcap);
     bool is_linux_sll = false;
 
-    // 如果编译环境没有定义 DLT_LINUX_SLL (通常是 113)
+    // 如果编译环境没有定义 DLT_LINUX_SLL (通常是 113) 和 LINUX_SLL2 (通常是 276)
     const int SLL_TYPE = 113;
+    const int SLL2_TYPE = 276;
 
     if (linktype == DLT_EN10MB) {
         logToDialog(LogLevel::LOG_INFO, "链路类型: Ethernet (DLT_EN10MB)");
     }
-    else if (linktype == SLL_TYPE) {
+    else if (linktype == SLL_TYPE || linktype == SLL2_TYPE) {
         is_linux_sll = true;
-        logToDialog(LogLevel::LOG_INFO, "检测到 Linux Cooked Capture (SLL) 格式，将自动标准化为 Ethernet 帧。");
+        std::string sll_type_str = (linktype == SLL_TYPE) ? "SLL" : "SLL2";
+        logToDialog(LogLevel::LOG_INFO, "检测到 Linux Cooked Capture (" + sll_type_str + ") 格式，将自动标准化为 Ethernet 帧。");
     }
     else {
-        std::string warning_msg = "不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (1) 或 SLL (113)";
+        std::string warning_msg = "不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (1) 或 SLL (113) 或 SLL2 (276)";
         logToDialog(LogLevel::LOG_WARNING, "警告: " + warning_msg);
     }
 
@@ -340,24 +342,46 @@ bool PCAPToLVX2::convert() {
     // --- 优化部分：在读取时处理包头偏移 ---
     while ((result = pcap_next_ex(pcap, &header, &data)) > 0) {
         if (is_linux_sll) {
-            if (header->caplen >= 16) {
-                // 1. 获取 SLL 中的原始协议类型 (位于偏移量 14-15 字节)
-                uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 14);
+            std::vector<uint8_t> normalized_pkt;
 
-                // 2. 构造 14 字节的伪造以太网头
-                std::vector<uint8_t> normalized_pkt;
-                normalized_pkt.reserve(14 + (header->caplen - 16));
+            if (linktype == SLL_TYPE) {
+                if (header->caplen >= 16) {
+                    // 1. 获取 SLL 中的原始协议类型 (位于偏移量 14-15 字节)
+                    uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 14);
 
-                // 填充 12 字节 MAC 地址为 0
-                for (int i = 0; i < 12; ++i) normalized_pkt.push_back(0);
+                    // 2. 构造 14 字节的伪造以太网头
+                    normalized_pkt.reserve(14 + (header->caplen - 16));
 
-                // 填充协议类型 (保持网络字节序)
-                normalized_pkt.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
-                normalized_pkt.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
+                    // 填充 12 字节 MAC 地址为 0
+                    for (int i = 0; i < 12; ++i) normalized_pkt.push_back(0);
 
-                // 3. 追加 IP 层及之后的所有原始数据 (跳过原 SLL 头的 16 字节)
-                normalized_pkt.insert(normalized_pkt.end(), data + 16, data + header->caplen);
+                    // 填充协议类型 (保持网络字节序)
+                    normalized_pkt.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
+                    normalized_pkt.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
 
+                    // 3. 追加 IP 层及之后的所有原始数据 (跳过原 SLL 头的 16 字节)
+                    normalized_pkt.insert(normalized_pkt.end(), data + 16, data + header->caplen);
+                }
+            }
+            else if (linktype == SLL2_TYPE) {
+                if (header->caplen >= 20) {
+                    // LINKTYPE_LINUX_SLL2: 协议类型在偏移 0-1，头长 20 字节
+                    uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 0);
+
+                    // 构造 14 字节伪以太网头
+                    normalized_pkt.reserve(14 + (header->caplen - 20));
+
+                    for (int i = 0; i < 12; ++i) normalized_pkt.push_back(0);
+
+                    normalized_pkt.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
+                    normalized_pkt.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
+
+                    // 追加 IP 层及之后的所有原始数据 (跳过 20 字节 SLL2 头)
+                    normalized_pkt.insert(normalized_pkt.end(), data + 20, data + header->caplen);
+                }
+            }
+
+            if (!normalized_pkt.empty()) {
                 all_raw_packets.emplace_back(std::move(normalized_pkt));
             }
         }

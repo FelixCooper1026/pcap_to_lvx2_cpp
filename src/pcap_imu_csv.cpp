@@ -28,26 +28,38 @@ extern HWND g_hLogDlg;
 std::vector<uint8_t> convertPacketToEthernet(const u_char* data, uint32_t caplen, int linktype) {
     std::vector<uint8_t> result;
 
-    // Linux Cooked Capture (SLL) 类型
+    // Linux Cooked Capture (SLL / SLL2) 类型
     const int SLL_TYPE = 113;
+    const int SLL2_TYPE = 276;
 
     if (linktype == SLL_TYPE) {
         if (caplen >= 16) {
-            // 1. 获取 SLL 中的原始协议类型 (位于偏移量 14-15 字节)
+            // SLL: 协议类型在偏移量 14-15 字节，头长 16 字节
             uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 14);
 
-            // 2. 构造 14 字节的伪造以太网头
             result.reserve(14 + (caplen - 16));
 
-            // 填充 12 字节 MAC 地址为 0
             for (int i = 0; i < 12; ++i) result.push_back(0);
 
-            // 填充协议类型 (保持网络字节序)
             result.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
             result.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
 
-            // 3. 追加 IP 层及之后的所有原始数据 (跳过原 SLL 头的 16 字节)
             result.insert(result.end(), data + 16, data + caplen);
+        }
+    }
+    else if (linktype == SLL2_TYPE) {
+        if (caplen >= 20) {
+            // SLL2: 协议类型在偏移量 0-1 字节，头长 20 字节
+            uint16_t protocol_type = *reinterpret_cast<const uint16_t*>(data + 0);
+
+            result.reserve(14 + (caplen - 20));
+
+            for (int i = 0; i < 12; ++i) result.push_back(0);
+
+            result.push_back(static_cast<uint8_t>(protocol_type & 0xFF));
+            result.push_back(static_cast<uint8_t>((protocol_type >> 8) & 0xFF));
+
+            result.insert(result.end(), data + 20, data + caplen);
         }
     }
     else if (linktype == DLT_EN10MB) {
@@ -98,18 +110,20 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
     int linktype = pcap_datalink(pcap);
     bool is_linux_sll = false;
 
-    // 如果编译环境没有定义 DLT_LINUX_SLL (通常是 113)
+    // 如果编译环境没有定义 DLT_LINUX_SLL (通常是 113) 和 LINUX_SLL2 (通常是 276)
     const int SLL_TYPE = 113;
+    const int SLL2_TYPE = 276;
 
     if (linktype == DLT_EN10MB) {
         logToDialog(LogLevel::LOG_INFO, "链路类型: Ethernet (DLT_EN10MB)");
     }
-    else if (linktype == SLL_TYPE) {
+    else if (linktype == SLL_TYPE || linktype == SLL2_TYPE) {
         is_linux_sll = true;
-        logToDialog(LogLevel::LOG_INFO, "检测到 Linux Cooked Capture (SLL) 格式，将自动标准化为 Ethernet 帧。");
+        std::string sll_type_str = (linktype == SLL_TYPE) ? "SLL" : "SLL2";
+        logToDialog(LogLevel::LOG_INFO, "检测到 Linux Cooked Capture (" + sll_type_str + ") 格式，将自动标准化为 Ethernet 帧。");
     }
     else {
-        std::string warning_msg = "不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (1) 或 SLL (113)";
+        std::string warning_msg = "不支持的链路类型: " + std::to_string(linktype) + "\n期望类型: 以太网 (1) 或 SLL (113) 或 SLL2 (276)";
         logToDialog(LogLevel::LOG_WARNING, "警告: " + warning_msg);
     }
 
@@ -189,7 +203,7 @@ bool extractImuDataToCsv(const std::string& pcap_file, const std::string& csv_fi
         // 根据链路类型转换数据包格式
         std::vector<uint8_t> pkt_data;
 
-        if (linktype == SLL_TYPE) {
+        if (linktype == SLL_TYPE || linktype == SLL2_TYPE) {
             pkt_data = convertPacketToEthernet(data, header->caplen, linktype);
         }
         else {
